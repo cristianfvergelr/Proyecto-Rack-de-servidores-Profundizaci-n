@@ -9,27 +9,52 @@
   body{font-family:system-ui,sans-serif;margin:0;background:#0f1518;color:#e8eeec}
   header{padding:22px 26px;border-bottom:1px solid #22302e}
   h1{margin:0;font-size:1.25rem}
+  h2{font-size:.78rem;letter-spacing:.1em;text-transform:uppercase;color:#8ba39e;font-weight:600;margin:28px 0 10px}
   main{padding:22px 26px;max-width:1100px}
   .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:14px}
   .kpi{background:#16201f;border:1px solid #24312f;border-radius:6px;padding:14px 16px}
   .kpi span{font-size:.72rem;letter-spacing:.1em;text-transform:uppercase;color:#8ba39e}
   .kpi b{display:block;font-size:1.9rem;font-weight:600;margin-top:4px}
+  .kpi small{display:block;color:#8ba39e;font-size:.76rem;margin-top:2px}
+  .kpi.alarma{border-color:#e5484d;background:#2a1517}
+  .kpi.alarma b{color:#ff8589}
   .barra{display:flex;gap:8px;margin:22px 0 14px;flex-wrap:wrap}
   button{background:#16201f;color:#cfdedb;border:1px solid #2c3a37;
          border-radius:5px;padding:7px 13px;cursor:pointer;font:inherit;font-size:.86rem}
   button[aria-pressed="true"]{border-color:#3fcfbe;color:#3fcfbe}
   .panel{background:#16201f;border:1px solid #24312f;border-radius:6px;padding:16px;margin-top:6px}
   #estado{color:#8ba39e;font-size:.84rem;margin-top:12px}
+
+  /* Banner de alertas */
+  #banner{border-radius:6px;padding:12px 16px;margin-bottom:16px;font-size:.92rem;
+          border:1px solid #24312f;background:#16201f;color:#8ba39e}
+  #banner.ok{border-color:#1f5c4f;background:#122522;color:#3fcfbe}
+  #banner.alarma{border-color:#e5484d;background:#2a1517;color:#ffb3b5;animation:pulso 2s infinite}
+  #banner ul{margin:6px 0 0;padding-left:20px}
+  @keyframes pulso{50%{border-color:#7a2a2d}}
+
+  /* Historial */
+  table{width:100%;border-collapse:collapse;font-size:.84rem}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid #22302e;vertical-align:top}
+  th{color:#8ba39e;font-weight:500;font-size:.72rem;letter-spacing:.08em;text-transform:uppercase}
+  td.msg{white-space:pre-line;color:#cfdedb}
+  .tag{display:inline-block;padding:2px 7px;border-radius:4px;font-size:.72rem;font-weight:600}
+  .tag.alerta{background:#3a1a1c;color:#ff8589}
+  .tag.recordatorio{background:#3a2c14;color:#efa45c}
+  .tag.normal{background:#122f2a;color:#3fcfbe}
+  .umbrales{color:#8ba39e;font-size:.82rem;margin-top:8px}
 </style>
 </head>
 <body>
 <header><h1>Monitoreo de temperatura y humedad</h1></header>
 <main>
+  <div id="banner">Cargando estado de alertas…</div>
+
   <div class="kpis">
-    <div class="kpi"><span>Temperatura actual</span><b id="tAhora">--</b></div>
-    <div class="kpi"><span>Humedad actual</span><b id="hAhora">--</b></div>
+    <div class="kpi" id="kT"><span>Temperatura actual</span><b id="tAhora">--</b><small id="tLim"></small></div>
+    <div class="kpi" id="kH"><span>Humedad actual</span><b id="hAhora">--</b><small id="hLim"></small></div>
     <div class="kpi"><span>Máx / mín temp</span><b id="tRango">--</b></div>
-    <div class="kpi"><span>Muestras</span><b id="nDatos">--</b></div>
+    <div class="kpi" id="kU"><span>Última lectura</span><b id="uHace">--</b><small id="nDatos"></small></div>
   </div>
 
   <div class="barra">
@@ -40,22 +65,32 @@
   </div>
 
   <div class="panel"><canvas id="grafica" height="120"></canvas></div>
+  <p class="umbrales" id="umbrales"></p>
+
+  <h2>Últimas alertas enviadas por WhatsApp</h2>
+  <div class="panel" style="overflow-x:auto">
+    <table>
+      <thead><tr><th>Fecha</th><th>Evento</th><th>Mensaje</th></tr></thead>
+      <tbody id="historial"><tr><td colspan="3">--</td></tr></tbody>
+    </table>
+  </div>
+
   <p id="estado">Cargando…</p>
 </main>
 
 <script>
 const SUPABASE_URL = "https://zsfaxjetkuxlhtdcaayt.supabase.co";
 const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpzZmF4amV0a3V4bGh0ZGNhYXl0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTAzNTY2MjMsImV4cCI6MjEwNTkzMjYyM30.zEtRfQ4HvbIoaj3pROkjWDjaC-TYR0EnulG8oehWS04";
+const DISPOSITIVO  = "esp32-01";   // solo se grafica este sensor (las pruebas no ensucian la gráfica)
 
 let horas = 24, filas = [], chart;
+let cfg = null, alertasActivas = [], historial = [];
 
-async function traer(){
-  const desde = new Date(Date.now() - horas*3600e3).toISOString();
-  const url = SUPABASE_URL + "/rest/v1/lecturas"
-            + "?select=temperatura,humedad,creado_en"
-            + "&creado_en=gte." + desde
-            + "&order=creado_en.asc&limit=10000";
-  const r = await fetch(url, { headers: {
+const NOMBRES = { temp_alta:"Temperatura alta", hum_alta:"Humedad alta",
+                  hum_baja:"Humedad baja", sin_datos:"Sensor sin datos" };
+
+async function api(ruta){
+  const r = await fetch(SUPABASE_URL + "/rest/v1/" + ruta, { headers: {
       apikey: SUPABASE_KEY,
       Authorization: "Bearer " + SUPABASE_KEY
   }});
@@ -63,30 +98,109 @@ async function traer(){
   return r.json();
 }
 
+function traer(){
+  const desde = new Date(Date.now() - horas*3600e3).toISOString();
+  return api("lecturas?select=temperatura,humedad,creado_en"
+           + "&dispositivo=eq." + encodeURIComponent(DISPOSITIVO)
+           + "&creado_en=gte." + desde
+           + "&order=creado_en.asc&limit=10000");
+}
+
+// Tablas de alertas: si aún no se ha ejecutado el SQL, el dashboard sigue funcionando
+async function traerAlertas(){
+  try{
+    const [c, e, l] = await Promise.all([
+      api("alerta_config?select=*&id=eq.1"),
+      api("alerta_estado?select=dispositivo,tipo,desde&activa=eq.true"),
+      api("alerta_log?select=creado_en,dispositivo,evento,mensaje&order=creado_en.desc&limit=10")
+    ]);
+    cfg = c[0] || null; alertasActivas = e; historial = l;
+  }catch(_){ cfg = null; alertasActivas = []; historial = []; }
+}
+
+const hora = d => new Date(d).toLocaleString("es-CO",
+  {day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"});
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
 function pintar(){
-  const etiquetas = filas.map(f => new Date(f.creado_en).toLocaleString("es-CO",
-                      {day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}));
+  const etiquetas = filas.map(f => hora(f.creado_en));
   const temp = filas.map(f => +f.temperatura);
   const hum  = filas.map(f => +f.humedad);
+  const ult  = filas[filas.length-1];
 
-  const ult = filas[filas.length-1];
+  // ---- KPIs ----
   document.getElementById("tAhora").textContent = ult ? (+ult.temperatura).toFixed(1)+" °C" : "--";
   document.getElementById("hAhora").textContent = ult ? (+ult.humedad).toFixed(1)+" %"   : "--";
   document.getElementById("tRango").textContent = temp.length
       ? Math.max(...temp).toFixed(1)+" / "+Math.min(...temp).toFixed(1)+" °C" : "--";
-  document.getElementById("nDatos").textContent = filas.length;
+  document.getElementById("nDatos").textContent = filas.length + " muestras en el periodo";
 
-  const datos = {
-    labels: etiquetas,
-    datasets: [
-      { label:"Temperatura (°C)", data:temp, yAxisID:"y",
-        borderColor:"#efa45c", backgroundColor:"rgba(239,164,92,.12)",
-        fill:true, tension:.3, pointRadius:0, borderWidth:2 },
-      { label:"Humedad (%HR)",  data:hum,  yAxisID:"y2",
-        borderColor:"#3fcfbe", backgroundColor:"rgba(63,207,190,.12)",
-        fill:true, tension:.3, pointRadius:0, borderWidth:2 }
-    ]
-  };
+  const minHace = ult ? Math.floor((Date.now() - new Date(ult.creado_en)) / 60000) : null;
+  document.getElementById("uHace").textContent =
+      minHace === null ? "--" : (minHace < 1 ? "ahora" : "hace " + minHace + " min");
+
+  const tAlta = cfg && ult && +ult.temperatura > +cfg.temp_max;
+  const hFuera = cfg && ult && (+ult.humedad > +cfg.hum_max ||
+                               (cfg.hum_min !== null && +ult.humedad < +cfg.hum_min));
+  const caido  = cfg && minHace !== null && minHace >= cfg.sin_datos_min;
+  document.getElementById("kT").classList.toggle("alarma", !!tAlta);
+  document.getElementById("kH").classList.toggle("alarma", !!hFuera);
+  document.getElementById("kU").classList.toggle("alarma", !!caido);
+  document.getElementById("tLim").textContent = cfg ? "Límite " + +cfg.temp_max + " °C" : "";
+  document.getElementById("hLim").textContent = cfg
+      ? (cfg.hum_min !== null ? "Rango " + +cfg.hum_min + "–" : "Máx ") + +cfg.hum_max + " %" : "";
+
+  // ---- Banner ----
+  const banner = document.getElementById("banner");
+  if(!cfg){
+    banner.className = "";
+    banner.textContent = "Alertas por WhatsApp no configuradas todavía.";
+  }else if(!cfg.activo){
+    banner.className = "";
+    banner.textContent = "⏸ Alertas por WhatsApp en pausa (mantenimiento).";
+  }else if(alertasActivas.length){
+    banner.className = "alarma";
+    banner.innerHTML = "<b>🚨 " + alertasActivas.length + " alerta(s) activa(s)</b><ul>" +
+      alertasActivas.map(a => "<li>" + esc(NOMBRES[a.tipo] || a.tipo) + " · " + esc(a.dispositivo) +
+                               " · desde " + hora(a.desde) + "</li>").join("") + "</ul>";
+  }else{
+    banner.className = "ok";
+    banner.textContent = "✅ Todo en rango · alertas por WhatsApp activas";
+  }
+
+  // ---- Umbrales en texto ----
+  document.getElementById("umbrales").textContent = cfg
+    ? "Líneas punteadas = umbrales de alerta. Temp. máx " + +cfg.temp_max + " °C · Humedad "
+      + (cfg.hum_min !== null ? +cfg.hum_min + "–" : "máx ") + +cfg.hum_max + " %"
+      + " · Recordatorio cada " + cfg.recordatorio_min + " min · Sensor caído tras "
+      + cfg.sin_datos_min + " min sin datos."
+    : "";
+
+  // ---- Historial ----
+  document.getElementById("historial").innerHTML = historial.length
+    ? historial.map(a => "<tr><td>" + hora(a.creado_en) + "</td><td><span class='tag " + esc(a.evento) + "'>"
+        + esc(a.evento) + "</span></td><td class='msg'>" + esc(a.mensaje.replace(/\*/g, "")) + "</td></tr>").join("")
+    : "<tr><td colspan='3'>Sin alertas registradas.</td></tr>";
+
+  // ---- Gráfica ----
+  const linea = (v, color, eje, nombre) => ({
+    label: nombre, data: filas.map(() => v), yAxisID: eje,
+    borderColor: color, borderDash: [6,5], borderWidth: 1.2, pointRadius: 0, fill: false
+  });
+  const datasets = [
+    { label:"Temperatura (°C)", data:temp, yAxisID:"y",
+      borderColor:"#efa45c", backgroundColor:"rgba(239,164,92,.12)",
+      fill:true, tension:.3, pointRadius:0, borderWidth:2 },
+    { label:"Humedad (%HR)",  data:hum,  yAxisID:"y2",
+      borderColor:"#3fcfbe", backgroundColor:"rgba(63,207,190,.12)",
+      fill:true, tension:.3, pointRadius:0, borderWidth:2 }
+  ];
+  if(cfg){
+    datasets.push(linea(+cfg.temp_max, "#e5484d", "y",  "Límite temp."));
+    datasets.push(linea(+cfg.hum_max,  "#4f8fd6", "y2", "Límite hum."));
+    if(cfg.hum_min !== null) datasets.push(linea(+cfg.hum_min, "#4f8fd6", "y2", "Mín hum."));
+  }
+  const datos = { labels: etiquetas, datasets };
   const opciones = {
     responsive:true, interaction:{mode:"index",intersect:false},
     plugins:{ legend:{labels:{color:"#cfdedb"}} },
@@ -105,7 +219,7 @@ function pintar(){
 async function refrescar(){
   const estado = document.getElementById("estado");
   try{
-    filas = await traer();
+    [filas] = await Promise.all([traer(), traerAlertas()]);
     pintar();
     estado.textContent = "Actualizado " + new Date().toLocaleTimeString("es-CO")
                        + " · " + filas.length + " registros";
